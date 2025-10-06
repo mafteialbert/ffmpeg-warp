@@ -79,47 +79,6 @@ typedef struct {
     int64_t *pts_map;          ///< Input PTS values
     size_t pts_map_size;            ///< Loaded points
 } WarpContext;
-
-static av_cold int init_timemap(WarpContext *s, void *log_ctx)
-{
-    FILE *f;
-    char line[256];
-    int line_num = 0, ret = 0;
-
-    if (!s->timemap_filename) {
-        av_log(log_ctx, AV_LOG_ERROR, "No timemap file specified\n");
-        return AVERROR(EINVAL);
-    }
-
-    f = fopen(s->timemap_filename, "r");
-    if (!f) {
-        av_log(log_ctx, AV_LOG_ERROR, "Could not open timemap file '%s'\n",
-               s->timemap_filename);
-        return AVERROR(errno);
-    }
-
-    while (fgets(line, sizeof(line), f)) {
-        line_num++;
-        ret = parse_timemap_line(s, line, line_num, log_ctx);
-        if (ret < 0) {
-            fclose(f);
-            return ret;
-        }
-    }
-    fclose(f);
-
-    if (s->nb_points < 2) {
-        av_log(log_ctx, AV_LOG_ERROR,
-               "Timemap file '%s' must contain at least 2 points\n",
-               s->timemap_filename);
-        return AVERROR(EINVAL);
-    }
-
-    av_log(log_ctx, AV_LOG_INFO, "Loaded %d timemap points from %s\n",
-           s->nb_points, s->timemap_filename);
-    return 0;
-}
-
 /* --- core filter callbacks --- */
 
 static av_cold int init(AVFilterContext *ctx)
@@ -134,7 +93,7 @@ static av_cold int init(AVFilterContext *ctx)
 
     if (s->timemap_filename) {
         ret = av_file_map(s->timemap_filename,
-                          &s->pts_map, &s->pts_map_size, 0, ctx);
+                          (uint8_t**)&s->pts_map, &s->pts_map_size, 0, ctx);
         if (ret < 0)
             return ret;
         s->pts_map_size/=8;
@@ -152,11 +111,11 @@ static inline int64_t warp_pts(int64_t in_pts, WarpContext *s)
     if (in_pts <= s->pts_map[0])
         return s->pts_map[1];
     if (in_pts >= s->pts_map[s->pts_map_size -2 ])
-        return s->out_pts[s->pts_map_size - 1];
+        return s->pts_map[s->pts_map_size - 1];
 
     // Binary search to find the interval [in_pts[i], in_pts[i+1]]
     int left = 0;
-    int right = s->nb_points - 2; // we access i and i+1
+    int right = s->pts_map_size - 2; // we access i and i+1
     int mid;
 
     while (left <= right) {
@@ -170,9 +129,9 @@ static inline int64_t warp_pts(int64_t in_pts, WarpContext *s)
     }
 
     int64_t in0 = s->pts_map[mid * 2];
-    int64_t in1 = s->in_pts[mid * 2 + 2];
-    int64_t out0 = s->out_pts[mid*2 + 1];
-    int64_t out1 = s->out_pts[mid*2 + 3];
+    int64_t in1 = s->pts_map[mid * 2 + 2];
+    int64_t out0 = s->pts_map[mid*2 + 1];
+    int64_t out1 = s->pts_map[mid*2 + 3];
 
     // Linear interpolation
     double t = (double)(in_pts - in0) / (double)(in1 - in0);
