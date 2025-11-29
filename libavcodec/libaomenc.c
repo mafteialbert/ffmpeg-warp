@@ -31,7 +31,6 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/base64.h"
-#include "libavutil/common.h"
 #include "libavutil/cpu.h"
 #include "libavutil/hdr_dynamic_metadata.h"
 #include "libavutil/imgutils.h"
@@ -50,7 +49,6 @@
 #include "internal.h"
 #include "itut35.h"
 #include "libaom.h"
-#include "packet_internal.h"
 #include "profiles.h"
 
 /*
@@ -394,16 +392,16 @@ static av_cold int codecctl_intp(AVCodecContext *avctx,
     int width = -30;
     int res;
 
-    snprintf(buf, sizeof(buf), "%s:", ctlidstr[id]);
-    av_log(avctx, AV_LOG_DEBUG, "  %*s%d\n", width, buf, *ptr);
-
     res = aom_codec_control(&ctx->encoder, id, ptr);
     if (res != AOM_CODEC_OK) {
-        snprintf(buf, sizeof(buf), "Failed to set %s codec control",
+        snprintf(buf, sizeof(buf), "Failed to get %s codec control",
                  ctlidstr[id]);
         log_encoder_error(avctx, buf);
         return AVERROR(EINVAL);
     }
+
+    snprintf(buf, sizeof(buf), "%s:", ctlidstr[id]);
+    av_log(avctx, AV_LOG_DEBUG, "  %*s%d\n", width, buf, *ptr);
 
     return 0;
 }
@@ -484,7 +482,6 @@ static int set_pix_fmt(AVCodecContext *avctx, aom_codec_caps_t codec_caps,
                        struct aom_codec_enc_cfg *enccfg, aom_codec_flags_t *flags,
                        aom_img_fmt_t *img_fmt)
 {
-    av_unused AOMContext *ctx = avctx->priv_data;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(avctx->pix_fmt);
     enccfg->g_bit_depth = enccfg->g_input_bit_depth = desc->comp[0].depth;
     switch (avctx->pix_fmt) {
@@ -1090,7 +1087,7 @@ static int storeframe(AVCodecContext *avctx, struct FrameListData *cx_frame,
                       AVPacket *pkt)
 {
     AOMContext *ctx = avctx->priv_data;
-    av_unused int pict_type;
+    enum AVPictureType pict_type;
     int ret = ff_get_encode_buffer(avctx, pkt, cx_frame->sz, 0);
     if (ret < 0) {
         av_log(avctx, AV_LOG_ERROR,
@@ -1110,8 +1107,8 @@ static int storeframe(AVCodecContext *avctx, struct FrameListData *cx_frame,
         pict_type = AV_PICTURE_TYPE_P;
     }
 
-    ff_side_data_set_encoder_stats(pkt, 0, cx_frame->sse + 1,
-                                   cx_frame->have_sse ? 3 : 0, pict_type);
+    ff_encode_add_stats_side_data(pkt, 0, cx_frame->sse + 1,
+                                  cx_frame->have_sse ? 3 : 0, pict_type);
 
     if (cx_frame->have_sse) {
         int i;

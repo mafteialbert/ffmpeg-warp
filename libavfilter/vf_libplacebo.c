@@ -261,6 +261,7 @@ typedef struct LibplaceboContext {
     float saturation;
     float hue;
     float gamma;
+    float temperature;
 
     /* pl_peak_detect_params */
     int peakdetect;
@@ -446,6 +447,8 @@ static int update_settings(AVFilterContext *ctx)
         .saturation = s->saturation,
         .hue = s->hue,
         .gamma = s->gamma,
+        // libplacebo uses a normalized/relative scale for CCT
+        .temperature = (s->temperature - 6500.0) / 3500.0,
     };
 
     opts->peak_detect_params = *pl_peak_detect_params(
@@ -858,6 +861,11 @@ static const AVFrame *ref_frame(const struct pl_frame_mix *mix)
     return NULL;
 }
 
+static inline double q2d_fallback(AVRational q, const double def)
+{
+    return (q.num && q.den) ? av_q2d(q) : def;
+}
+
 static void update_crops(AVFilterContext *ctx, LibplaceboInput *in,
                          struct pl_frame *target, double target_pts)
 {
@@ -879,8 +887,7 @@ static void update_crops(AVFilterContext *ctx, LibplaceboInput *in,
         s->var_values[VAR_IN_W]   = s->var_values[VAR_IW] = inlink->w;
         s->var_values[VAR_IN_H]   = s->var_values[VAR_IH] = inlink->h;
         s->var_values[VAR_A]      = (double) inlink->w / inlink->h;
-        s->var_values[VAR_SAR]    = inlink->sample_aspect_ratio.num ?
-            av_q2d(inlink->sample_aspect_ratio) : 1.0;
+        s->var_values[VAR_SAR]    = q2d_fallback(inlink->sample_aspect_ratio, 1.0);
         s->var_values[VAR_IN_T]   = s->var_values[VAR_T]  = image_pts;
         s->var_values[VAR_OUT_T]  = s->var_values[VAR_OT] = target_pts;
         s->var_values[VAR_N]      = outl->frame_count_out;
@@ -909,13 +916,6 @@ static void update_crops(AVFilterContext *ctx, LibplaceboInput *in,
         image->crop.y0 = av_expr_eval(s->crop_y_pexpr, s->var_values, NULL);
         image->crop.x1 = image->crop.x0 + s->var_values[VAR_CROP_W];
         image->crop.y1 = image->crop.y0 + s->var_values[VAR_CROP_H];
-        image->rotation = s->rotation;
-        if (s->rotation % PL_ROTATION_180 == PL_ROTATION_90) {
-            /* Libplacebo expects the input crop relative to the actual frame
-             * dimensions, so un-transpose them here */
-            FFSWAP(float, image->crop.x0, image->crop.y0);
-            FFSWAP(float, image->crop.x1, image->crop.y1);
-        }
 
         if (src == ref) {
             /* Only update the target crop once, for the 'reference' frame */
@@ -924,12 +924,17 @@ static void update_crops(AVFilterContext *ctx, LibplaceboInput *in,
             target->crop.x1 = target->crop.x0 + s->var_values[VAR_POS_W];
             target->crop.y1 = target->crop.y0 + s->var_values[VAR_POS_H];
 
+
             /* Effective visual crop */
-            const float w_adj = av_q2d(inlink->sample_aspect_ratio) /
-                                av_q2d(outlink->sample_aspect_ratio);
+            double sar_in = q2d_fallback(inlink->sample_aspect_ratio, 1.0);
+            double sar_out = q2d_fallback(outlink->sample_aspect_ratio, 1.0);
+
+            pl_rotation rot_total = PL_ROTATION_360 + image->rotation - target->rotation;
+            if (rot_total % PL_ROTATION_180 == PL_ROTATION_90)
+                sar_in = 1.0 / sar_in;
 
             pl_rect2df fixed = image->crop;
-            pl_rect2df_stretch(&fixed, w_adj, 1.0);
+            pl_rect2df_stretch(&fixed, sar_in / sar_out, 1.0);
 
             switch (s->fit_mode) {
             case FIT_FILL:
@@ -950,6 +955,13 @@ static void update_crops(AVFilterContext *ctx, LibplaceboInput *in,
             }
             case FIT_SCALE_DOWN:
                 pl_rect2df_aspect_fit(&target->crop, &fixed, 0.0);
+            }
+
+            if (rot_total % PL_ROTATION_180 == PL_ROTATION_90) {
+                /* Libplacebo expects the input crop relative to the actual frame
+                 * dimensions, so un-transpose them here */
+                FFSWAP(float, image->crop.x0, image->crop.y0);
+                FFSWAP(float, image->crop.x1, image->crop.y1);
             }
         }
     }
@@ -1147,6 +1159,7 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex,
     ));
     out->lut = s->lut;
     out->lut_type = s->lut_type;
+    out->rotation += s->rotation;
 
     if (!s->apply_filmgrain)
         out->film_grain.type = PL_FILM_GRAIN_NONE;
@@ -1273,7 +1286,7 @@ static int libplacebo_activate(AVFilterContext *ctx)
             in->qstatus = pl_queue_update(in->queue, &in->mix, pl_queue_params(
                 .pts            = TS2T(out_pts, outlink->time_base),
                 .radius         = pl_frame_mix_radius(&s->opts->params),
-                .vsync_duration = l->frame_rate.num ? av_q2d(av_inv_q(l->frame_rate)) : 0,
+                .vsync_duration = q2d_fallback(av_inv_q(l->frame_rate), 0.0),
             ));
 
             switch (in->qstatus) {
@@ -1456,8 +1469,7 @@ static int libplacebo_config_output(AVFilterLink *outlink)
                                  &outlink->w, &outlink->h));
 
     s->reset_sar |= s->normalize_sar || s->nb_inputs > 1;
-    double sar_in = inlink->sample_aspect_ratio.num ?
-                    av_q2d(inlink->sample_aspect_ratio) : 1.0;
+    double sar_in = q2d_fallback(inlink->sample_aspect_ratio, 1.0);
 
     int force_oar = s->force_original_aspect_ratio;
     if (!force_oar && s->fit_sense == FIT_CONSTRAINT) {
@@ -1544,8 +1556,7 @@ static int libplacebo_config_output(AVFilterLink *outlink)
     /* Static variables */
     s->var_values[VAR_OUT_W]    = s->var_values[VAR_OW] = outlink->w;
     s->var_values[VAR_OUT_H]    = s->var_values[VAR_OH] = outlink->h;
-    s->var_values[VAR_DAR]      = outlink->sample_aspect_ratio.num ?
-        av_q2d(outlink->sample_aspect_ratio) : 1.0;
+    s->var_values[VAR_DAR]      = q2d_fallback(outlink->sample_aspect_ratio, 1.0);
     s->var_values[VAR_HSUB]     = 1 << desc->log2_chroma_w;
     s->var_values[VAR_VSUB]     = 1 << desc->log2_chroma_h;
     s->var_values[VAR_OHSUB]    = 1 << out_desc->log2_chroma_w;
@@ -1647,7 +1658,7 @@ static const AVOption libplacebo_options[] = {
     {"pc",                           NULL,   0, AV_OPT_TYPE_CONST, {.i64=AVCOL_RANGE_JPEG},         0, 0, STATIC, .unit = "range"},
     {"jpeg",                         NULL,   0, AV_OPT_TYPE_CONST, {.i64=AVCOL_RANGE_JPEG},         0, 0, STATIC, .unit = "range"},
 
-    {"color_primaries", "select color primaries", OFFSET(color_primaries), AV_OPT_TYPE_INT, {.i64=-1}, -1, AVCOL_PRI_NB-1, DYNAMIC, .unit = "color_primaries"},
+    {"color_primaries", "select color primaries", OFFSET(color_primaries), AV_OPT_TYPE_INT, {.i64=-1}, -1, AVCOL_PRI_EXT_NB-1, DYNAMIC, .unit = "color_primaries"},
     {"auto", "keep the same color primaries",  0, AV_OPT_TYPE_CONST, {.i64=-1},                     INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
     {"bt709",                           NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_PRI_BT709},        INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
     {"unknown",                         NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_PRI_UNSPECIFIED},  INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
@@ -1662,8 +1673,9 @@ static const AVOption libplacebo_options[] = {
     {"smpte432",                        NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_PRI_SMPTE432},     INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
     {"jedec-p22",                       NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_PRI_JEDEC_P22},    INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
     {"ebu3213",                         NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_PRI_EBU3213},      INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
+    {"vgamut",                          NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_PRI_V_GAMUT},      INT_MIN, INT_MAX, STATIC, .unit = "color_primaries"},
 
-    {"color_trc", "select color transfer", OFFSET(color_trc), AV_OPT_TYPE_INT, {.i64=-1}, -1, AVCOL_TRC_NB-1, DYNAMIC, .unit = "color_trc"},
+    {"color_trc", "select color transfer", OFFSET(color_trc), AV_OPT_TYPE_INT, {.i64=-1}, -1, AVCOL_TRC_EXT_NB-1, DYNAMIC, .unit = "color_trc"},
     {"auto", "keep the same color transfer",  0, AV_OPT_TYPE_CONST, {.i64=-1},                     INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
     {"bt709",                          NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_TRC_BT709},        INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
     {"unknown",                        NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_TRC_UNSPECIFIED},  INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
@@ -1679,6 +1691,7 @@ static const AVOption libplacebo_options[] = {
     {"bt2020-12",                      NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_TRC_BT2020_12},    INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
     {"smpte2084",                      NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_TRC_SMPTE2084},    INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
     {"arib-std-b67",                   NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_TRC_ARIB_STD_B67}, INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
+    {"vlog",                           NULL,  0, AV_OPT_TYPE_CONST, {.i64=AVCOL_TRC_V_LOG},        INT_MIN, INT_MAX, STATIC, .unit = "color_trc"},
 
     {"rotate", "rotate the input clockwise", OFFSET(rotation), AV_OPT_TYPE_INT, {.i64=PL_ROTATION_0}, PL_ROTATION_0, PL_ROTATION_360, DYNAMIC, .unit = "rotation"},
     {"0",                              NULL,  0, AV_OPT_TYPE_CONST, {.i64=PL_ROTATION_0},   .flags = STATIC, .unit = "rotation"},
@@ -1723,6 +1736,7 @@ static const AVOption libplacebo_options[] = {
     { "saturation", "Saturation gain", OFFSET(saturation), AV_OPT_TYPE_FLOAT, {.dbl = 1.0}, 0.0, 16.0, DYNAMIC },
     { "hue", "Hue shift", OFFSET(hue), AV_OPT_TYPE_FLOAT, {.dbl = 0.0}, -M_PI, M_PI, DYNAMIC },
     { "gamma", "Gamma adjustment", OFFSET(gamma), AV_OPT_TYPE_FLOAT, {.dbl = 1.0}, 0.0, 16.0, DYNAMIC },
+    { "temperature", "Color temperature adjustment (kelvin)", OFFSET(temperature), AV_OPT_TYPE_FLOAT, {.dbl = 6500.0}, 1667.0, 25000.0, DYNAMIC },
 
     { "peak_detect", "Enable dynamic peak detection for HDR tone-mapping", OFFSET(peakdetect), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, DYNAMIC },
     { "smoothing_period", "Peak detection smoothing period", OFFSET(smoothing), AV_OPT_TYPE_FLOAT, {.dbl = 100.0}, 0.0, 1000.0, DYNAMIC },

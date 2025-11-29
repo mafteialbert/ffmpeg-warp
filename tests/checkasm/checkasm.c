@@ -141,7 +141,11 @@ static const struct {
     #if CONFIG_BSWAPDSP
         { "bswapdsp", checkasm_check_bswapdsp },
     #endif
+    #if CONFIG_CAVS_DECODER
+        { "cavsdsp", checkasm_check_cavsdsp },
+    #endif
     #if CONFIG_DCA_DECODER
+        { "dcadsp", checkasm_check_dcadsp },
         { "synth_filter", checkasm_check_synth_filter },
     #endif
     #if CONFIG_DIRAC_DECODER
@@ -220,6 +224,9 @@ static const struct {
     #if CONFIG_PIXBLOCKDSP
         { "pixblockdsp", checkasm_check_pixblockdsp },
     #endif
+    #if CONFIG_QPELDSP
+        { "qpeldsp", checkasm_check_qpeldsp },
+    #endif
     #if CONFIG_RV34DSP
         { "rv34dsp", checkasm_check_rv34dsp },
     #endif
@@ -243,6 +250,12 @@ static const struct {
     #endif
     #if CONFIG_VC1DSP
         { "vc1dsp", checkasm_check_vc1dsp },
+    #endif
+    #if CONFIG_VP3DSP
+        { "vp3dsp", checkasm_check_vp3dsp },
+    #endif
+    #if CONFIG_VP6_DECODER
+        { "vp6dsp", checkasm_check_vp6dsp },
     #endif
     #if CONFIG_VP8DSP
         { "vp8dsp", checkasm_check_vp8dsp },
@@ -286,6 +299,9 @@ static const struct {
     #endif
     #if CONFIG_EQ_FILTER
         { "vf_eq", checkasm_check_vf_eq },
+    #endif
+    #if CONFIG_FSPP_FILTER
+        { "vf_fspp", checkasm_check_vf_fspp },
     #endif
     #if CONFIG_GBLUR_FILTER
         { "vf_gblur", checkasm_check_vf_gblur },
